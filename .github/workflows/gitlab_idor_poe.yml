@@ -15,8 +15,8 @@ jobs:
             --hostname localhost \
             --name gitlab-idor-poe \
             -p 8181:80 \
-            -e GITLAB_ROOT_PASSWORD="xK9#mP2vL8nQ5!" \
-            -e GITLAB_OMNIBUS_CONFIG="gitlab_rails['initial_root_password']='xK9#mP2vL8nQ5!'; gitlab_rails['gitlab_signup_enabled']=true;" \
+            -e GITLAB_ROOT_PASSWORD="xK9mP2vL8nQ5" \
+            -e GITLAB_OMNIBUS_CONFIG="gitlab_rails['initial_root_password']='xK9mP2vL8nQ5'; gitlab_rails['gitlab_signup_enabled']=true;" \
             --shm-size 256m \
             gitlab/gitlab-ee:latest
           echo "Container started: $(docker ps -q --filter name=gitlab-idor-poe)"
@@ -42,23 +42,46 @@ jobs:
           echo "ROOT_PAT=${ROOT_PAT}" >> $GITHUB_ENV
           echo "Root PAT acquired: ${ROOT_PAT:0:8}..."
 
-      - name: Create User A and User B (single-line Rails runner)
+      - name: Create User A and User B via REST API
         run: |
-          USER_A_ID=$(docker exec gitlab-idor-poe gitlab-rails runner "u=User.new(name:'Alice Admin',username:'alice_admin',email:'alice@idor-poe.local',password:'AlicePass99!#',password_confirmation:'AlicePass99!#',admin:true,confirmed_at:Time.now); u.save!; puts u.id" 2>&1 | tail -1)
+          USER_A_JSON=$(curl -sf -X POST "http://localhost:8181/api/v4/users" \
+            -H "Authorization: Bearer $ROOT_PAT" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"Alice Admin","username":"alice_admin","email":"alice@idor-poe.test","password":"AlicePass1","admin":true,"skip_confirmation":true}')
+          echo "User A response: $USER_A_JSON"
+          USER_A_ID=$(echo "$USER_A_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id','ERR'))")
           echo "USER_A_ID=${USER_A_ID}" >> $GITHUB_ENV
-          echo "User A created — id=${USER_A_ID}"
+          echo "User A created: id=${USER_A_ID}"
 
-          USER_B_ID=$(docker exec gitlab-idor-poe gitlab-rails runner "u=User.new(name:'Bob Admin',username:'bob_admin',email:'bob@idor-poe.local',password:'BobPass99!#xZ',password_confirmation:'BobPass99!#xZ',admin:true,confirmed_at:Time.now); u.save!; puts u.id" 2>&1 | tail -1)
+          USER_B_JSON=$(curl -sf -X POST "http://localhost:8181/api/v4/users" \
+            -H "Authorization: Bearer $ROOT_PAT" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"Bob Admin","username":"bob_admin","email":"bob@idor-poe.test","password":"BobsPass1","admin":true,"skip_confirmation":true}')
+          echo "User B response: $USER_B_JSON"
+          USER_B_ID=$(echo "$USER_B_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id','ERR'))")
           echo "USER_B_ID=${USER_B_ID}" >> $GITHUB_ENV
-          echo "User B created — id=${USER_B_ID}"
+          echo "User B created: id=${USER_B_ID}"
 
-      - name: Create PATs for User A and User B (single-line Rails runner)
+      - name: Create PATs for User A and User B via REST API
         run: |
-          USER_A_PAT=$(docker exec gitlab-idor-poe gitlab-rails runner "t=User.find($USER_A_ID).personal_access_tokens.create!(name:'alice-poe',scopes:['api'],expires_at:7.days.from_now); puts t.token" 2>&1 | tail -1)
-          USER_B_PAT=$(docker exec gitlab-idor-poe gitlab-rails runner "t=User.find($USER_B_ID).personal_access_tokens.create!(name:'bob-poe',scopes:['api'],expires_at:7.days.from_now); puts t.token" 2>&1 | tail -1)
+          EXPIRES=$(date -d '+7 days' '+%Y-%m-%d')
+
+          USER_A_PAT_JSON=$(curl -sf -X POST "http://localhost:8181/api/v4/users/${USER_A_ID}/personal_access_tokens" \
+            -H "Authorization: Bearer $ROOT_PAT" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"alice-poe\",\"scopes\":[\"api\"],\"expires_at\":\"${EXPIRES}\"}")
+          echo "User A PAT response: $USER_A_PAT_JSON"
+          USER_A_PAT=$(echo "$USER_A_PAT_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token','ERR'))")
           echo "USER_A_PAT=${USER_A_PAT}" >> $GITHUB_ENV
-          echo "USER_B_PAT=${USER_B_PAT}" >> $GITHUB_ENV
           echo "User A PAT: ${USER_A_PAT:0:8}..."
+
+          USER_B_PAT_JSON=$(curl -sf -X POST "http://localhost:8181/api/v4/users/${USER_B_ID}/personal_access_tokens" \
+            -H "Authorization: Bearer $ROOT_PAT" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"bob-poe\",\"scopes\":[\"api\"],\"expires_at\":\"${EXPIRES}\"}")
+          echo "User B PAT response: $USER_B_PAT_JSON"
+          USER_B_PAT=$(echo "$USER_B_PAT_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token','ERR'))")
+          echo "USER_B_PAT=${USER_B_PAT}" >> $GITHUB_ENV
           echo "User B PAT: ${USER_B_PAT:0:8}..."
 
       - name: Discover AiAcceptedSelfHostedModels enum + confirm policy MISSING
