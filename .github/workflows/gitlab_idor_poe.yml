@@ -47,7 +47,7 @@ jobs:
           USER_A_JSON=$(curl -s -X POST "http://localhost:8181/api/v4/users" \
             -H "Authorization: Bearer $ROOT_PAT" \
             -H "Content-Type: application/json" \
-            -d '{"name":"Alice Admin","username":"alice_admin","email":"alice@idor-poe.test","password":"AlicePass1!","admin":true,"skip_confirmation":true}')
+            -d '{"name":"Alice Admin","username":"alice_admin","email":"alice@idor-poe.test","password":"Qz7!Xp3mV9rL","admin":true,"skip_confirmation":true}')
           echo "User A response: $USER_A_JSON"
           USER_A_ID=$(echo "$USER_A_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id','ERR:'+str(d.get('message',d))))")
           echo "USER_A_ID=${USER_A_ID}" >> $GITHUB_ENV
@@ -57,7 +57,7 @@ jobs:
           USER_B_JSON=$(curl -s -X POST "http://localhost:8181/api/v4/users" \
             -H "Authorization: Bearer $ROOT_PAT" \
             -H "Content-Type: application/json" \
-            -d '{"name":"Bob Admin","username":"bob_admin","email":"bob@idor-poe.test","password":"BobsPass1!","admin":true,"skip_confirmation":true}')
+            -d '{"name":"Bob Admin","username":"bob_admin","email":"bob@idor-poe.test","password":"Wn4@Ky8tH2jR","admin":true,"skip_confirmation":true}')
           echo "User B response: $USER_B_JSON"
           USER_B_ID=$(echo "$USER_B_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id','ERR:'+str(d.get('message',d))))")
           echo "USER_B_ID=${USER_B_ID}" >> $GITHUB_ENV
