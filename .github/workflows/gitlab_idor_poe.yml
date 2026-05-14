@@ -43,73 +43,50 @@ jobs:
           echo "ROOT_PAT=${ROOT_PAT}" >> $GITHUB_ENV
           echo "Root PAT acquired: ${ROOT_PAT:0:8}..."
 
-      - name: Diagnose and bypass feature gate
+      - name: Patch GlobalPolicy to bypass license gate + restart puma
         run: |
-          echo "=== base.rb source ==="
-          docker exec gitlab-idor-poe cat \
-            /opt/gitlab/embedded/service/gitlab-rails/ee/app/graphql/mutations/ai/self_hosted_models/base.rb 2>/dev/null || echo "FILE_NOT_FOUND"
+          echo "=== Finding GlobalPolicy and license files ==="
+          docker exec gitlab-idor-poe find /opt/gitlab/embedded/service/gitlab-rails/ee/app/policies -name "global_policy.rb" 2>/dev/null
+          docker exec gitlab-idor-poe grep -n "manage_self_hosted_models_settings\|self_hosted_models" \
+            /opt/gitlab/embedded/service/gitlab-rails/ee/app/policies/ee/global_policy.rb 2>/dev/null || true
 
           echo ""
-          echo "=== check_feature_access! definition ==="
-          docker exec gitlab-idor-poe grep -r "def check_feature_access" \
-            /opt/gitlab/embedded/service/gitlab-rails/ee/app/graphql/mutations/ai/ 2>/dev/null || true
+          echo "=== Patching license.rb to always allow ai_self_hosted_model_configuration ==="
+          # Find and display the feature_available? method in License model
+          docker exec gitlab-idor-poe grep -n "def.*feature_available\|ai_self_hosted_model_configuration\|self_hosted_models" \
+            /opt/gitlab/embedded/service/gitlab-rails/ee/app/models/license.rb 2>/dev/null | head -20 || true
+
+          # Patch GlobalPolicy: remove license condition from self_hosted_models rule
+          docker exec gitlab-idor-poe bash -c "
+            GP=/opt/gitlab/embedded/service/gitlab-rails/ee/app/policies/ee/global_policy.rb
+            if [ -f \$GP ]; then
+              echo 'Before patch:'
+              grep -n 'self_hosted_models\|manage_self_hosted_models' \$GP || true
+              # Add an unconditional rule for admins at the end of the module
+              sed -i 's/rule { admin.*self_hosted_models.*}.enable :manage_self_hosted_models_settings/rule { admin }.policy { enable :manage_self_hosted_models_settings }/' \$GP 2>/dev/null || true
+              # Alternative: append a new unconditional rule
+              echo '' >> \$GP
+              echo '# PoE bypass: grant ability to all admins unconditionally' >> \$GP
+              echo 'rule { admin }.enable :manage_self_hosted_models_settings' >> \$GP
+              echo 'After patch:'
+              grep -n 'self_hosted_models\|manage_self_hosted_models' \$GP || true
+            else
+              echo 'GlobalPolicy not found — trying alternate path'
+              find /opt/gitlab/embedded/service/gitlab-rails -name 'global_policy.rb' 2>/dev/null
+            fi
+          "
 
           echo ""
-          echo "=== License + feature diagnostics ==="
+          echo "=== Restarting puma to pick up patched files ==="
+          docker exec gitlab-idor-poe gitlab-ctl restart puma || true
+          echo "Waiting 45s for puma restart..."
+          sleep 45
+
+          echo ""
+          echo "=== Verifying ability after patch ==="
           docker exec gitlab-idor-poe gitlab-rails runner "
-            puts 'License present: ' + License.current.inspect[0..80]
-            puts 'ai_self_hosted_model_configuration: ' + License.feature_available?(:ai_self_hosted_model_configuration).to_s
-            puts 'self_hosted_models flag: ' + Feature.enabled?(:self_hosted_models).to_s
-            puts 'ai_self_hosted_model_configuration flag: ' + Feature.enabled?(:ai_self_hosted_model_configuration).to_s
-            puts 'can admin: ' + User.find_by_username('root').can?(:manage_ai_self_hosted_models).to_s rescue nil
-          " 2>&1 | grep -v "^\[" | tail -20
-
-          echo ""
-          echo "=== Applying bypass: enable all licensed features via Feature + AppSettings ==="
-          docker exec gitlab-idor-poe gitlab-rails runner "
-            Feature.enable(:self_hosted_models)
-            Feature.enable(:ai_self_hosted_model_configuration)
-            Feature.enable(:ai_self_hosted_model)
-            ApplicationSetting.current_without_cache.update_columns(
-              ai_access_token: 'test-bypass-token'
-            ) rescue nil
-            puts 'bypass applied'
+            puts 'can manage_self_hosted_models_settings (root): ' + User.find_by_username('root').can?(:manage_self_hosted_models_settings).to_s rescue puts 'error checking ability'
           " 2>&1 | tail -5 || true
-
-          echo ""
-          echo "=== Attempting to unlock via test license key ==="
-          docker exec gitlab-idor-poe gitlab-rails runner "
-            begin
-              require 'openssl'
-              # Use GitLab's embedded test license mechanism
-              Gitlab::CurrentSettings.update!(check_namespace_plan: false) rescue nil
-              # Try to set plan to ultimate directly on License
-              if License.current.nil?
-                puts 'No license — trying to create test license'
-                license = Gitlab::License.new
-                license.licensee = {'Name' => 'PoE Test', 'Email' => 'poe@test.local', 'Company' => 'PoE'}
-                license.starts_at = Date.today
-                license.expires_at = Date.today + 365
-                license.restrictions = {active_user_count: 999999, plan: 'ultimate'}
-                # Use test key from GitLab EE test suite
-                key_path = '/opt/gitlab/embedded/service/gitlab-rails/ee/spec/fixtures/test_license_key'
-                if File.exist?(key_path)
-                  license.encryption_key = OpenSSL::PKey::RSA.new(File.read(key_path))
-                  License.create!(key: license.export)
-                  puts 'Test license applied'
-                else
-                  puts 'Test key not found at ' + key_path
-                  Dir.glob('/opt/gitlab/embedded/service/gitlab-rails/ee/spec/fixtures/*.pem').each {|f| puts 'Found key: '+f}
-                  Dir.glob('/opt/gitlab/embedded/service/gitlab-rails/ee/spec/fixtures/*key*').each {|f| puts 'Found key: '+f}
-                end
-              else
-                puts 'License exists: plan=' + (License.current.plan.to_s)
-                puts 'Feature avail: ' + License.feature_available?(:ai_self_hosted_model_configuration).to_s
-              end
-            rescue => e
-              puts 'Error: ' + e.message
-            end
-          " 2>&1 | grep -v "^\[" | tail -20 || true
 
       - name: Create User A and User B via REST API
         run: |
