@@ -6,7 +6,7 @@ on:
 jobs:
   poe:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
 
     steps:
       - name: Start GitLab EE container
@@ -68,11 +68,12 @@ jobs:
           docker exec gitlab-idor-poe grep -n "manage_self_hosted_models_settings\|PoE-bypass" "$GP" || true
 
           echo ""
-          echo "=== Restarting puma ==="
-          docker exec gitlab-idor-poe gitlab-ctl restart puma || true
+          echo "=== Restarting puma (hup = graceful reload, faster than full restart) ==="
+          docker exec gitlab-idor-poe gitlab-ctl hup puma || docker exec gitlab-idor-poe gitlab-ctl restart puma || true
+          docker exec gitlab-idor-poe gitlab-ctl status puma || true
 
-          echo "=== Polling until GitLab API is back up (max 120s) ==="
-          for i in $(seq 1 24); do
+          echo "=== Polling until GitLab API is back up (max 300s) ==="
+          for i in $(seq 1 60); do
             if curl -sf http://localhost:8181/api/v4/version -o /dev/null 2>/dev/null; then
               echo "GitLab API back up after $((i * 5))s"
               break
