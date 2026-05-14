@@ -45,48 +45,47 @@ jobs:
 
       - name: Patch GlobalPolicy to bypass license gate + restart puma
         run: |
-          echo "=== Finding GlobalPolicy and license files ==="
-          docker exec gitlab-idor-poe find /opt/gitlab/embedded/service/gitlab-rails/ee/app/policies -name "global_policy.rb" 2>/dev/null
-          docker exec gitlab-idor-poe grep -n "manage_self_hosted_models_settings\|self_hosted_models" \
-            /opt/gitlab/embedded/service/gitlab-rails/ee/app/policies/ee/global_policy.rb 2>/dev/null || true
+          GP=/opt/gitlab/embedded/service/gitlab-rails/ee/app/policies/ee/global_policy.rb
+
+          echo "=== Before patch ==="
+          docker exec gitlab-idor-poe grep -n "manage_self_hosted_models_settings\|self_hosted_models_allowed" "$GP" || true
 
           echo ""
-          echo "=== Patching license.rb to always allow ai_self_hosted_model_configuration ==="
-          # Find and display the feature_available? method in License model
-          docker exec gitlab-idor-poe grep -n "def.*feature_available\|ai_self_hosted_model_configuration\|self_hosted_models" \
-            /opt/gitlab/embedded/service/gitlab-rails/ee/app/models/license.rb 2>/dev/null | head -20 || true
-
-          # Patch GlobalPolicy: remove license condition from self_hosted_models rule
+          echo "=== Patching: comment out prevent rule + add unconditional admin enable ==="
           docker exec gitlab-idor-poe bash -c "
             GP=/opt/gitlab/embedded/service/gitlab-rails/ee/app/policies/ee/global_policy.rb
-            if [ -f \$GP ]; then
-              echo 'Before patch:'
-              grep -n 'self_hosted_models\|manage_self_hosted_models' \$GP || true
-              # Add an unconditional rule for admins at the end of the module
-              sed -i 's/rule { admin.*self_hosted_models.*}.enable :manage_self_hosted_models_settings/rule { admin }.policy { enable :manage_self_hosted_models_settings }/' \$GP 2>/dev/null || true
-              # Alternative: append a new unconditional rule
-              echo '' >> \$GP
-              echo '# PoE bypass: grant ability to all admins unconditionally' >> \$GP
-              echo 'rule { admin }.enable :manage_self_hosted_models_settings' >> \$GP
-              echo 'After patch:'
-              grep -n 'self_hosted_models\|manage_self_hosted_models' \$GP || true
-            else
-              echo 'GlobalPolicy not found — trying alternate path'
-              find /opt/gitlab/embedded/service/gitlab-rails -name 'global_policy.rb' 2>/dev/null
-            fi
+            # Remove the prevent rule that overrides enable (prevent always wins in DeclarativePolicy)
+            sed -i 's/rule { ~self_hosted_models_allowed }\.prevent :manage_self_hosted_models_settings/# PoE-bypass: prevent rule removed/' \"\$GP\"
+            # Also remove any other prevent lines for this ability
+            sed -i 's/prevent :manage_self_hosted_models_settings/# PoE-bypass: prevent removed/' \"\$GP\"
+            # Add unconditional enable for all admins
+            echo '' >> \"\$GP\"
+            echo '# PoE-bypass: grant to all admins' >> \"\$GP\"
+            echo 'rule { admin }.enable :manage_self_hosted_models_settings' >> \"\$GP\"
           "
 
+          echo "=== After patch ==="
+          docker exec gitlab-idor-poe grep -n "manage_self_hosted_models_settings\|PoE-bypass" "$GP" || true
+
           echo ""
-          echo "=== Restarting puma to pick up patched files ==="
+          echo "=== Restarting puma ==="
           docker exec gitlab-idor-poe gitlab-ctl restart puma || true
-          echo "Waiting 45s for puma restart..."
-          sleep 45
+
+          echo "=== Polling until GitLab API is back up (max 120s) ==="
+          for i in $(seq 1 24); do
+            if curl -sf http://localhost:8181/api/v4/version -o /dev/null 2>/dev/null; then
+              echo "GitLab API back up after $((i * 5))s"
+              break
+            fi
+            sleep 5
+            echo "[$((i*5))s] waiting for puma..."
+          done
 
           echo ""
           echo "=== Verifying ability after patch ==="
-          docker exec gitlab-idor-poe gitlab-rails runner "
-            puts 'can manage_self_hosted_models_settings (root): ' + User.find_by_username('root').can?(:manage_self_hosted_models_settings).to_s rescue puts 'error checking ability'
-          " 2>&1 | tail -5 || true
+          docker exec gitlab-idor-poe gitlab-rails runner \
+            "puts 'can manage: ' + User.find_by_username('root').can?(:manage_self_hosted_models_settings).to_s rescue puts 'runner error'" \
+            2>/dev/null | tail -3 || true
 
       - name: Create User A and User B via REST API
         run: |
