@@ -44,18 +44,18 @@ jobs:
 
       - name: Create User A and User B (single-line Rails runner)
         run: |
-          USER_A_ID=$(docker exec gitlab-idor-poe gitlab-rails runner "u=User.new(name:'Alice Admin',username:'alice_admin',email:'alice@idor-poe.local',password:'AlicePass99!#',admin:true,skip_confirmation:true); u.skip_reconfirmation!; u.save!; puts u.id" 2>/dev/null | tail -1)
+          USER_A_ID=$(docker exec gitlab-idor-poe gitlab-rails runner "u=User.new(name:'Alice Admin',username:'alice_admin',email:'alice@idor-poe.local',password:'AlicePass99!#',password_confirmation:'AlicePass99!#',admin:true,confirmed_at:Time.now); u.save!; puts u.id" 2>&1 | tail -1)
           echo "USER_A_ID=${USER_A_ID}" >> $GITHUB_ENV
-          echo "User A (alice_admin) created — id=${USER_A_ID}"
+          echo "User A created — id=${USER_A_ID}"
 
-          USER_B_ID=$(docker exec gitlab-idor-poe gitlab-rails runner "u=User.new(name:'Bob Admin',username:'bob_admin',email:'bob@idor-poe.local',password:'BobPass99!#xZ',admin:true,skip_confirmation:true); u.skip_reconfirmation!; u.save!; puts u.id" 2>/dev/null | tail -1)
+          USER_B_ID=$(docker exec gitlab-idor-poe gitlab-rails runner "u=User.new(name:'Bob Admin',username:'bob_admin',email:'bob@idor-poe.local',password:'BobPass99!#xZ',password_confirmation:'BobPass99!#xZ',admin:true,confirmed_at:Time.now); u.save!; puts u.id" 2>&1 | tail -1)
           echo "USER_B_ID=${USER_B_ID}" >> $GITHUB_ENV
-          echo "User B (bob_admin) created — id=${USER_B_ID}"
+          echo "User B created — id=${USER_B_ID}"
 
       - name: Create PATs for User A and User B (single-line Rails runner)
         run: |
-          USER_A_PAT=$(docker exec gitlab-idor-poe gitlab-rails runner "t=User.find($USER_A_ID).personal_access_tokens.create!(name:'alice-poe',scopes:['api'],expires_at:7.days.from_now); puts t.token" 2>/dev/null | tail -1)
-          USER_B_PAT=$(docker exec gitlab-idor-poe gitlab-rails runner "t=User.find($USER_B_ID).personal_access_tokens.create!(name:'bob-poe',scopes:['api'],expires_at:7.days.from_now); puts t.token" 2>/dev/null | tail -1)
+          USER_A_PAT=$(docker exec gitlab-idor-poe gitlab-rails runner "t=User.find($USER_A_ID).personal_access_tokens.create!(name:'alice-poe',scopes:['api'],expires_at:7.days.from_now); puts t.token" 2>&1 | tail -1)
+          USER_B_PAT=$(docker exec gitlab-idor-poe gitlab-rails runner "t=User.find($USER_B_ID).personal_access_tokens.create!(name:'bob-poe',scopes:['api'],expires_at:7.days.from_now); puts t.token" 2>&1 | tail -1)
           echo "USER_A_PAT=${USER_A_PAT}" >> $GITHUB_ENV
           echo "USER_B_PAT=${USER_B_PAT}" >> $GITHUB_ENV
           echo "User A PAT: ${USER_A_PAT:0:8}..."
