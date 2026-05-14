@@ -21,13 +21,13 @@ jobs:
             gitlab/gitlab-ee:latest
           echo "Container started: $(docker ps -q --filter name=gitlab-idor-poe)"
 
-      - name: Patch GlobalPolicy BEFORE puma first load (no restart needed)
+      - name: Patch check_feature_access! to no-op BEFORE puma first load
         run: |
-          GP=/opt/gitlab/embedded/service/gitlab-rails/ee/app/policies/ee/global_policy.rb
+          BASE=/opt/gitlab/embedded/service/gitlab-rails/ee/app/graphql/mutations/ai/self_hosted_models/base.rb
 
           echo "Waiting for container filesystem to be accessible..."
           for i in $(seq 1 30); do
-            if docker exec gitlab-idor-poe test -f "$GP" 2>/dev/null; then
+            if docker exec gitlab-idor-poe test -f "$BASE" 2>/dev/null; then
               echo "File accessible after $((i*2))s"
               break
             fi
@@ -35,20 +35,17 @@ jobs:
           done
 
           echo "=== Before patch ==="
-          docker exec gitlab-idor-poe grep -n "manage_self_hosted_models_settings" "$GP" | head -10 || true
+          docker exec gitlab-idor-poe grep -n "check_feature_access\|raise_resource\|Ability.allowed" "$BASE" || true
 
           docker exec gitlab-idor-poe bash -c "
-            GP=/opt/gitlab/embedded/service/gitlab-rails/ee/app/policies/ee/global_policy.rb
-            sed -i 's/rule { ~self_hosted_models_allowed }\.prevent :manage_self_hosted_models_settings/# PoE-bypass: prevent rule removed/' \"\$GP\"
-            sed -i '/prevent :manage_self_hosted_models_settings/s/^/# PoE-bypass: /' \"\$GP\"
-            echo '' >> \"\$GP\"
-            echo '# PoE-bypass: unconditional admin grant' >> \"\$GP\"
-            echo 'rule { admin }.enable :manage_self_hosted_models_settings' >> \"\$GP\"
+            BASE=/opt/gitlab/embedded/service/gitlab-rails/ee/app/graphql/mutations/ai/self_hosted_models/base.rb
+            # Make check_feature_access! a no-op by removing the raise line
+            sed -i 's/raise_resource_not_available_error! unless Ability.allowed?(current_user, :manage_self_hosted_models_settings)/# PoE-bypass: access check disabled/' \"\$BASE\"
           "
 
           echo "=== After patch ==="
-          docker exec gitlab-idor-poe grep -n "manage_self_hosted_models_settings\|PoE-bypass" "$GP" | head -15 || true
-          echo "Patch applied — puma will load patched file on first boot"
+          docker exec gitlab-idor-poe grep -n "check_feature_access\|raise_resource\|PoE-bypass" "$BASE" || true
+          echo "Patch applied — puma will load no-op check_feature_access! on first boot"
 
       - name: Wait for GitLab API to be ready
         run: |
