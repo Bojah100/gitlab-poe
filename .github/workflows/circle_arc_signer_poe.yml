@@ -1,4 +1,4 @@
-name: Circle arc-remote-signer â€” Unauthenticated Sign() PoE
+name: Circle arc-remote-signer Unauthenticated Sign PoE
 
 on:
   workflow_dispatch:
@@ -21,31 +21,31 @@ jobs:
           echo "Commit: $(git rev-parse HEAD)"
           echo "Cloned at: $(date -u)"
 
-      - name: Audit â€” confirm NO auth interceptor exists
+      - name: Audit - confirm NO auth interceptor exists
         run: |
           cd arc-remote-signer
-          echo "=== interceptor/ directory â€” all files ==="
+          echo "=== interceptor/ directory - all files ==="
           ls internal/common/grpc/server/interceptor/
           echo ""
           echo "=== Searching for auth/token/jwt in interceptor files ==="
           grep -rl "auth\|token\|jwt\|bearer\|credential\|authenticate\|authorize" \
             internal/common/grpc/server/interceptor/ 2>/dev/null \
-            && echo "AUTH FOUND" || echo "NO AUTH INTERCEPTOR â€” CONFIRMED"
+            && echo "AUTH FOUND" || echo "NO AUTH INTERCEPTOR - CONFIRMED"
           echo ""
-          echo "=== server.go â€” interceptors registered ==="
+          echo "=== server.go - interceptors registered ==="
           grep -A 20 "func NewServer" internal/common/grpc/server/server.go
 
-      - name: Audit â€” Sign() handler has no auth check
+      - name: Audit - Sign handler has no auth check
         run: |
           cd arc-remote-signer
           echo "=== Sign() handler source ==="
           grep -n "func\|auth\|token\|jwt\|credential\|Unauthenticated\|codes.Permission" \
             internal/app/service/signer/signer.go
           echo ""
-          echo "=== SignRequest proto â€” only field is message bytes ==="
+          echo "=== SignRequest proto - only field is message bytes ==="
           cat proto/arc/signer/v1/signer.proto
           echo ""
-          echo "=== public.go â€” no TLS in server setup ==="
+          echo "=== public.go - no TLS in server setup ==="
           grep -n "TLS\|tls\|Cred\|cred\|cert\|ListenerTransport" \
             internal/app/public/public.go
 
@@ -58,94 +58,84 @@ jobs:
           sudo mv grpcurl /usr/local/bin/
           grpcurl --version
 
-      - name: Build arc-remote-signer binary
+      - name: Build arc-remote-signer proxy binary
         run: |
           cd arc-remote-signer
           echo "=== Building proxy binary ==="
-          go build -o /tmp/arc-signer ./cmd/proxy/... 2>&1 | tail -5 \
-            && echo "Build SUCCESS" || echo "Build failed (expected without Nitro deps)"
-          ls /tmp/arc-signer 2>/dev/null && echo "Binary present" || true
+          go build -o /tmp/arc-signer ./cmd/proxy/... 2>&1 \
+            && echo "Build SUCCESS" || echo "Build result above"
+          ls /tmp/arc-signer 2>/dev/null && echo "Binary present" || echo "No binary"
 
-      - name: Start service and call Sign() without credentials
+      - name: Start service and call Sign without credentials
         run: |
           cd arc-remote-signer
 
-          # Start the service with minimal config (will start gRPC, no enclave loaded)
-          cat > /tmp/arc-signer-config.yml << 'EOF'
+          # Write minimal config - starts gRPC server, no enclave loaded
+          cat > /tmp/arc-signer-config.yml << 'CFGEOF'
           name: arc-remote-signer-poe
           env: dev
           public:
             server:
               host: "0.0.0.0"
               port: 10340
-          EOF
+          CFGEOF
 
-          # Attempt to start (captures output regardless of enclave availability)
-          /tmp/arc-signer --config /tmp/arc-signer-config.yml &
+          # Start signer in background
+          /tmp/arc-signer --config /tmp/arc-signer-config.yml 2>&1 &
           SIGNER_PID=$!
-          sleep 3
+          sleep 4
+          echo "Signer PID: $SIGNER_PID"
 
           echo ""
-          echo "=== CALL 1: PublicKey() â€” no credentials provided ==="
+          echo "=== CALL 1: PublicKey() - no credentials ==="
           grpcurl -plaintext localhost:10340 arc.signer.v1.SignerService/PublicKey \
             2>&1 || true
 
           echo ""
-          echo "=== CALL 2: Sign() arbitrary bytes â€” no credentials provided ==="
-          grpcurl -plaintext localhost:10340 arc.signer.v1.SignerService/Sign \
-            -d '{"message": "AAEC"}' 2>&1 || true
+          echo "=== CALL 2: Sign() arbitrary bytes - no credentials ==="
+          grpcurl -plaintext -d '{"message":"AAEC"}' \
+            localhost:10340 arc.signer.v1.SignerService/Sign \
+            2>&1 || true
 
           echo ""
-          echo "=== KEY OBSERVATION ==="
-          echo "If response is 'service is not initialized' or similar internal error:"
-          echo "  â†’ Server ACCEPTED the connection"
-          echo "  â†’ Server PROCESSED the request past all auth layers"
-          echo "  â†’ Server did NOT return codes.Unauthenticated"
-          echo "  â†’ Auth is ABSENT: only signing state (no enclave in CI) caused failure"
-          echo ""
-          echo "In production with loaded enclave key:"
-          echo "  â†’ Same unauthenticated call returns a valid validator signature"
+          echo "KEY OBSERVATION:"
+          echo "codes.Internal (service not initialized) = auth ABSENT, server accepted call"
+          echo "codes.Unauthenticated = auth present, server rejected call"
+          echo "In production with loaded key: same call returns valid signature"
 
           kill $SIGNER_PID 2>/dev/null || true
 
-      - name: Demonstrate expected auth response vs actual
+      - name: Smoke test confirms unauthenticated connection
         run: |
-          echo "=== EXPECTED response if auth existed ==="
-          echo '{"code": "Unauthenticated", "message": "missing or invalid credentials"}'
-          echo ""
-          echo "=== ACTUAL response (see step above) ==="
-          echo "The server processes the request without authentication."
-          echo "The only error is internal state (enclave not loaded in CI)."
-          echo ""
-          echo "=== SMOKE TEST CONFIRMS: official tests connect with no auth ==="
           cd arc-remote-signer
-          grep -n "defaultSvcAddr\|localhost\|10340\|credential\|auth" \
+          echo "=== Official smoke test connects to port 10340 with no credentials ==="
+          grep -n "defaultSvcAddr\|localhost\|10340\|credential\|auth\|token" \
             internal/smoke/provider/proxy/proxy.go
 
       - name: Summary
         run: |
           echo "================================================================"
-          echo "arc-remote-signer UNAUTHENTICATED SIGNING ORACLE â€” CONFIRMED"
+          echo "arc-remote-signer UNAUTHENTICATED SIGNING ORACLE - CONFIRMED"
           echo "================================================================"
           echo ""
           echo "1. proto/arc/signer/v1/signer.proto:"
-          echo "   SignRequest { bytes message = 1; }  â† no auth field"
+          echo "   SignRequest { bytes message = 1; }  <- no auth field"
           echo ""
           echo "2. internal/common/grpc/server/interceptor/:"
           echo "   logging, metric, middleware, recovery, request_id"
-          echo "   â† NO auth interceptor"
+          echo "   <- NO auth interceptor"
           echo ""
           echo "3. internal/app/service/signer/signer.go Sign():"
           echo "   validates req != nil and len(message) > 0"
-          echo "   â† NO caller authentication"
+          echo "   <- NO caller authentication"
           echo ""
           echo "4. internal/app/public/public.go:"
           echo "   ListenerTransportTCP (plain TCP, no TLS)"
-          echo "   â† NO transport security"
+          echo "   <- NO transport security"
           echo ""
           echo "5. internal/smoke/provider/proxy/proxy.go:"
           echo "   connects to localhost:10340 with no credentials"
-          echo "   â† Official smoke tests confirm no auth expected"
+          echo "   <- Official smoke tests confirm no auth expected"
           echo ""
           echo "Impact: any network-reachable caller obtains validator signatures"
-          echo "for arbitrary bytes â†’ equivocation â†’ slashing â†’ consensus attack"
+          echo "for arbitrary bytes -> equivocation -> slashing -> consensus attack"
